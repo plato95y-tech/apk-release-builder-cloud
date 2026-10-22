@@ -1,0 +1,150 @@
+name: Build Signed Release
+
+on:
+  push:
+    paths:
+      - '**.zip'
+  workflow_dispatch:
+    inputs:
+      zip_path:
+        description: 'ZIP path inside the repo (leave empty to use the newest)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      INPUT_ZIP: ${{ github.event.inputs.zip_path }}
+      GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
+      KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+      CI_KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Find the project ZIP (any name)
+        id: findzip
+        run: |
+          git config core.quotepath off
+          Z="$INPUT_ZIP"
+          if [ -z "$Z" ]; then
+            Z=$(git diff --name-only --diff-filter=AM HEAD~1 HEAD 2>/dev/null | grep -i '\.zip$' | head -1 || true)
+          fi
+          if [ -z "$Z" ]; then
+            Z=$(git ls-files | grep -i '\.zip$' | head -1 || true)
+          fi
+          if [ -z "$Z" ] || [ ! -f "$Z" ]; then
+            echo "::error::No ZIP file found in the repository. Upload your project ZIP first."
+            exit 1
+          fi
+          echo "Using ZIP: $Z"
+          echo "zip=$Z" >> "$GITHUB_OUTPUT"
+          SAFE=$(basename "$Z" .zip | tr -c 'A-Za-z0-9._-\n' '_' | sed 's/^_*$/app/')
+          echo "name=$SAFE" >> "$GITHUB_OUTPUT"
+
+      - name: Restore signing keystore
+        run: |
+          if [ -z "$KEYSTORE_BASE64" ] || [ -z "$CI_KEYSTORE_PASSWORD" ]; then
+            echo "::error::Secrets KEYSTORE_BASE64 and KEYSTORE_PASSWORD are required"
+            exit 1
+          fi
+          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/upload.jks"
+          keytool -list -keystore "$RUNNER_TEMP/upload.jks" -storepass "$CI_KEYSTORE_PASSWORD" -alias upload > /dev/null
+          echo "Keystore OK"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Prepare project (extract, detect, auto-fix)
+        id: prep
+        env:
+          ZIP_PATH: ${{ steps.findzip.outputs.zip }}
+        run: python3 scripts/prepare_project.py "$ZIP_PATH" "$RUNNER_TEMP/project"
+
+      - name: Setup Gradle (project wrapper)
+        if: steps.prep.outputs.use_wrapper == 'true'
+        uses: gradle/actions/setup-gradle@v5
+
+      - name: Setup Gradle (installed, wrapper missing)
+        if: steps.prep.outputs.use_wrapper != 'true'
+        uses: gradle/actions/setup-gradle@v5
+        with:
+          gradle-version: ${{ steps.prep.outputs.gradle_version }}
+
+      - name: Build signed release APK
+        working-directory: ${{ runner.temp }}/project
+        env:
+          CI_KEYSTORE_PATH: ${{ runner.temp }}/upload.jks
+          CI_KEY_ALIAS: upload
+        run: |
+          if [ "${{ steps.prep.outputs.use_wrapper }}" = "true" ]; then CMD=./gradlew; else CMD=gradle; fi
+          $CMD assembleRelease --no-daemon --stacktrace \
+            --init-script "$GITHUB_WORKSPACE/scripts/signing.init.gradle" \
+            2>&1 | tee "$RUNNER_TEMP/build.log"
+
+      - name: Build AAB (for Google Play, optional)
+        working-directory: ${{ runner.temp }}/project
+        continue-on-error: true
+        env:
+          CI_KEYSTORE_PATH: ${{ runner.temp }}/upload.jks
+          CI_KEY_ALIAS: upload
+        run: |
+          if [ "${{ steps.prep.outputs.use_wrapper }}" = "true" ]; then CMD=./gradlew; else CMD=gradle; fi
+          $CMD bundleRelease --no-daemon --stacktrace \
+            --init-script "$GITHUB_WORKSPACE/scripts/signing.init.gradle" \
+            2>&1 | tee -a "$RUNNER_TEMP/build.log"
+
+      - name: Collect outputs
+        run: |
+          mkdir -p "$RUNNER_TEMP/out"
+          find "$RUNNER_TEMP/project" \( -path '*/build/outputs/apk/release/*.apk' -o -path '*/build/outputs/bundle/release/*.aab' \) -print0 \
+            | while IFS= read -r -d '' f; do
+                cp "$f" "$RUNNER_TEMP/out/${{ steps.findzip.outputs.name }}-$(basename "$f")"
+              done
+          ls -la "$RUNNER_TEMP/out"
+          if ! ls "$RUNNER_TEMP"/out/*.apk >/dev/null 2>&1; then
+            echo "::error::No release APK was produced."
+            exit 1
+          fi
+          if ls "$RUNNER_TEMP"/out/*unsigned* >/dev/null 2>&1; then
+            echo "::error::APK is UNSIGNED - the signing script did not apply. Check the build log."
+            exit 1
+          fi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.findzip.outputs.name }}-release
+          path: |
+            ${{ runner.temp }}/out/*.apk
+            ${{ runner.temp }}/out/*.aab
+          retention-days: 30
+
+      - name: Publish to Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="release-${{ steps.findzip.outputs.name }}-${{ github.run_number }}"
+          gh release create "$TAG" "$RUNNER_TEMP"/out/* \
+            --title "${{ steps.findzip.outputs.name }} #${{ github.run_number }}" \
+            --notes "Signed release built from ${{ steps.findzip.outputs.zip }}"
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: ${{ runner.temp }}/build.log
+          if-no-files-found: ignore
