@@ -64,6 +64,9 @@ jobs:
           echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/upload.jks"
           keytool -list -keystore "$RUNNER_TEMP/upload.jks" -storepass "$CI_KEYSTORE_PASSWORD" -alias upload > /dev/null
           echo "Keystore OK"
+          echo "KEYSTORE_PATH=$RUNNER_TEMP/upload.jks" >> "$GITHUB_ENV"
+          echo "STORE_PASSWORD=$CI_KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
+          echo "KEY_PASSWORD=$CI_KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
 
       - uses: actions/setup-java@v4
         with:
