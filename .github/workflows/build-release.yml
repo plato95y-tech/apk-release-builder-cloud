@@ -22,6 +22,9 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
     env:
       INPUT_ZIP: ${{ github.event.inputs.zip_path }}
       GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
@@ -49,7 +52,7 @@ jobs:
           fi
           echo "Using ZIP: $Z"
           echo "zip=$Z" >> "$GITHUB_OUTPUT"
-          SAFE=$(basename "$Z" .zip | tr -c 'A-Za-z0-9._-\n' '_' | sed 's/^_*$/app/')
+          SAFE=$(basename "$Z" .zip | tr -c 'A-Za-z0-9._\n-' '_' | sed 's/^_*$/app/')
           echo "name=$SAFE" >> "$GITHUB_OUTPUT"
 
       - name: Restore signing keystore
