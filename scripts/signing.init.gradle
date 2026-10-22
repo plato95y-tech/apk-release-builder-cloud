@@ -1,0 +1,20 @@
+allprojects { p ->
+    p.pluginManager.withPlugin('com.android.application') {
+        def ksPath = System.getenv('CI_KEYSTORE_PATH')
+        if (!ksPath || !new File(ksPath).isFile()) {
+            return
+        }
+        def android = p.extensions.getByName('android')
+        def cfg = android.signingConfigs.maybeCreate('ciRelease')
+        cfg.storeFile = new File(ksPath)
+        cfg.storePassword = System.getenv('CI_KEYSTORE_PASSWORD')
+        cfg.keyAlias = System.getenv('CI_KEY_ALIAS') ?: 'upload'
+        cfg.keyPassword = System.getenv('CI_KEY_PASSWORD') ?: System.getenv('CI_KEYSTORE_PASSWORD')
+        p.afterEvaluate {
+            def rel = android.buildTypes.findByName('release')
+            if (rel != null) {
+                rel.signingConfig = cfg
+            }
+        }
+    }
+}
